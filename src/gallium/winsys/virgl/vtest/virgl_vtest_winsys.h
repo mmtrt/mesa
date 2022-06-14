@@ -48,6 +48,8 @@ struct virgl_vtest_winsys {
 
    struct virgl_resource_cache cache;
    mtx_t mutex;
+   //
+   uint32_t dt_set;
 
    unsigned protocol_version;
 };
@@ -65,7 +67,9 @@ struct virgl_hw_res {
    uint32_t width;
    uint32_t height;
 
-   struct sw_displaytarget *dt;
+   //struct sw_displaytarget *dt;
+   struct vtest_displaytarget *dt;
+   
    void *mapped;
 
    uint32_t bind;
@@ -154,4 +158,14 @@ int virgl_vtest_recv_transfer_get_data(struct virgl_vtest_winsys *vws,
 
 int virgl_vtest_busy_wait(struct virgl_vtest_winsys *vws, int handle,
                           int flags);
+						  
+int virgl_vtest_send_dt(struct virgl_vtest_winsys *vws,
+					uint32_t cmd,
+					uint32_t x,
+					uint32_t y,
+					uint32_t w,
+					uint32_t h,
+					uint32_t id,
+					uint32_t handle,
+					uint32_t drawable);						  
 #endif

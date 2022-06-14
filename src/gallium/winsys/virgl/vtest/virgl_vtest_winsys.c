@@ -32,9 +32,91 @@
 #include "virgl_vtest_winsys.h"
 #include "virgl_vtest_public.h"
 
+#include "util/u_debug.h"
+#include "frontend/xlibsw_api.h"
+
 /* Gets a pointer to the virgl_hw_res containing the pointed to cache entry. */
 #define cache_entry_container_res(ptr) \
     (struct virgl_hw_res*)((char*)ptr - offsetof(struct virgl_hw_res, cache_entry))
+	
+#define VT_SYNC_COORDS (1U<<0)
+#define VT_IGNORE_MAP (1U<<1)
+#define VT_IGNORE_VIS (1U<<2)
+#define VT_TRACK_EVENTS (1U<<3)
+#define VT_ALWAYS_READBACK (1U<<4)
+#define VT_IGNORE_ATTR_COORDS (1U<<5)
+
+//
+static const struct debug_named_value dt_options[] = {
+		{"sync_coords",      VT_SYNC_COORDS,   "Sync coordinates every frame"},
+		{"ignore_map",      VT_IGNORE_MAP,   "Ignore map state"},
+		{"ignore_vis",      VT_IGNORE_VIS,   "Ignore partial visibility"},
+		{"track_events",      VT_TRACK_EVENTS,   "Track configure and visibility events"},
+		{"always_readback",      VT_ALWAYS_READBACK,   "Always read texture back(slow)"},
+		{"ignore_attr_coords",      VT_IGNORE_ATTR_COORDS,   "Always read texture back(slow)"},
+
+		DEBUG_NAMED_VALUE_END
+};
+
+DEBUG_GET_ONCE_FLAGS_OPTION(dt_options, "VTEST_DT_OPTIONS", dt_options, 0)
+
+extern bool hide_overlay;
+
+struct vtest_displaytarget
+{
+struct sw_displaytarget *sws_dt;
+Drawable drawable;
+int x,y,w,h;
+int vis;
+bool mapped;
+
+uint32_t id;
+};
+
+static Display *dt_dpy;
+
+static void vtest_displaytarget_destroy(struct virgl_vtest_winsys *vtws, 
+                                        struct vtest_displaytarget *dt)
+{
+   virgl_vtest_send_dt(vtws, VCMD_DT_CMD_DESTROY, 0, 0, 0, 0, dt->id, 0, 0);
+   vtws->sws->displaytarget_destroy(vtws->sws, dt->sws_dt);
+   vtws->dt_set &= ~(1 << dt->id);
+   FREE(dt);
+}
+
+static struct vtest_displaytarget *
+vtest_displaytarget_create(struct virgl_vtest_winsys *vtws,
+                          unsigned tex_usage,
+                          enum pipe_format format,
+                          unsigned width, unsigned height,
+                          unsigned alignment,
+                          const void *front_private,
+                          unsigned *stride)
+{
+   struct vtest_displaytarget *dt;
+   int id = 0;
+
+   // allocate handle (0<=handle<32) for remote dt
+   while((vtws->dt_set & (1<<id)) && (id < 32)) id++;
+
+   if(id == 32)
+      return NULL;
+
+   dt = CALLOC_STRUCT(vtest_displaytarget);
+   dt->id = id;
+   dt->sws_dt = vtws->sws->displaytarget_create(vtws->sws, tex_usage, format,
+                                                width, height, alignment, front_private,
+                                                stride);
+
+   virgl_vtest_send_dt(vtws, VCMD_DT_CMD_CREATE, 0, 0, width, height, id, 0, 0);
+   vtws->dt_set |= 1 << id;
+
+   if( !dt_dpy )
+      dt_dpy = XOpenDisplay(NULL);
+
+   return dt;
+}	
+//
 
 static void *virgl_vtest_resource_map(struct virgl_winsys *vws,
                                       struct virgl_hw_res *res);
@@ -117,6 +199,12 @@ virgl_vtest_transfer_get_internal(struct virgl_winsys *vws,
 
    size = vtest_get_transfer_size(res, box, stride, layer_stride, level,
                                   &valid_stride);
+
+///
+   /* Don't ask for more pixels than available (see above) */
+   /*if (size + buf_offset > res->size)
+      size = res->size - buf_offset;*/
+
    virgl_vtest_send_transfer_get(vtws, res->res_handle,
                                  level, stride, layer_stride,
                                  box, size, buf_offset);
@@ -140,14 +228,16 @@ virgl_vtest_transfer_get_internal(struct virgl_winsys *vws,
           */
          shm_stride = util_format_get_stride(res->format, res->width);
          ptr = virgl_vtest_resource_map(vws, res);
-         dt_map = vtws->sws->displaytarget_map(vtws->sws, res->dt, 0);
+         //dt_map = vtws->sws->displaytarget_map(vtws->sws, res->dt, 0);
+         dt_map = vtws->sws->displaytarget_map(vtws->sws, res->dt->sws_dt, 0);
 
          util_copy_rect(dt_map, res->format, res->stride, box->x, box->y,
                         box->width, box->height, ptr, shm_stride, box->x,
                         box->y);
 
          virgl_vtest_resource_unmap(vws, res);
-         vtws->sws->displaytarget_unmap(vtws->sws, res->dt);
+         //vtws->sws->displaytarget_unmap(vtws->sws, res->dt);
+         vtws->sws->displaytarget_unmap(vtws->sws, res->dt->sws_dt);
       }
    } else {
       ptr = virgl_vtest_resource_map(vws, res);
@@ -176,7 +266,8 @@ static void virgl_hw_res_destroy(struct virgl_vtest_winsys *vtws,
 {
    virgl_vtest_send_resource_unref(vtws, res->res_handle);
    if (res->dt)
-      vtws->sws->displaytarget_destroy(vtws->sws, res->dt);
+      vtest_displaytarget_destroy(vtws, res->dt);
+      //vtws->sws->displaytarget_destroy(vtws->sws, res->dt);
    if (vtws->protocol_version >= 2) {
       if (res->ptr)
          os_munmap(res->ptr, res->size);
@@ -255,9 +346,12 @@ virgl_vtest_winsys_resource_create(struct virgl_winsys *vws,
       return NULL;
 
    if (bind & (VIRGL_BIND_DISPLAY_TARGET | VIRGL_BIND_SCANOUT)) {
-      res->dt = vtws->sws->displaytarget_create(vtws->sws, bind, format,
+      /*res->dt = vtws->sws->displaytarget_create(vtws->sws, bind, format,
                                                 width, height, 64, NULL,
-                                                &res->stride);
+                                                &res->stride);*/
+      res->dt = vtest_displaytarget_create(vtws, bind, format,
+                                           width, height, 64, NULL,
+                                           &res->stride);												
 
    } else if (vtws->protocol_version < 2) {
       res->ptr = align_malloc(size, 64);
@@ -324,7 +418,8 @@ static void *virgl_vtest_resource_map(struct virgl_winsys *vws,
       res->mapped = res->ptr;
       return res->mapped;
    } else {
-      return vtws->sws->displaytarget_map(vtws->sws, res->dt, 0);
+      //return vtws->sws->displaytarget_map(vtws->sws, res->dt, 0);
+      return vtws->sws->displaytarget_map(vtws->sws, res->dt->sws_dt, 0);
    }
 }
 
@@ -336,7 +431,8 @@ static void virgl_vtest_resource_unmap(struct virgl_winsys *vws,
       res->mapped = NULL;
 
    if (res->dt && vtws->protocol_version < 2)
-      vtws->sws->displaytarget_unmap(vtws->sws, res->dt);
+      vtws->sws->displaytarget_unmap(vtws->sws, res->dt->sws_dt);
+      //vtws->sws->displaytarget_unmap(vtws->sws, res->dt);
 }
 
 static void virgl_vtest_resource_wait(struct virgl_winsys *vws,
@@ -582,7 +678,8 @@ static bool virgl_fence_wait(struct virgl_winsys *vws,
    struct virgl_hw_res *res = virgl_hw_res(fence);
 
    if (timeout == 0)
-      return !virgl_vtest_resource_is_busy(vws, res);
+      return 1;
+      //return !virgl_vtest_resource_is_busy(vws, res);
 
    if (timeout != PIPE_TIMEOUT_INFINITE) {
       int64_t start_time = os_time_get();
@@ -616,8 +713,18 @@ static void virgl_vtest_flush_frontbuffer(struct virgl_winsys *vws,
    struct virgl_vtest_winsys *vtws = virgl_vtest_winsys(vws);
    struct pipe_box box;
    uint32_t offset = 0;
-   if (!res->dt)
+   //if (!res->dt)
+      //return;
+  
+//
+   struct xlib_drawable *dr = (struct xlib_drawable*)winsys_drawable_handle;
+   struct vtest_displaytarget *dt = res->dt;
+   bool dt_sync_coords = (debug_get_option_dt_options() & VT_SYNC_COORDS) || (!dt->drawable && !(debug_get_option_dt_options() & VT_ALWAYS_READBACK));
+   bool dt_visible;
+
+   if (!dt)
       return;
+//  
 
    memset(&box, 0, sizeof(box));
 
@@ -632,11 +739,130 @@ static void virgl_vtest_flush_frontbuffer(struct virgl_winsys *vws,
       box.depth = 1;
    }
 
-   virgl_vtest_transfer_get_internal(vws, res, &box, res->stride, 0, offset,
-                                     level, true);
+   virgl_vtest_transfer_get_internal(vws, res, &box, res->stride, 0, offset, level, true);
 
-   vtws->sws->displaytarget_display(vtws->sws, res->dt, winsys_drawable_handle,
-                                    sub_box);
+// CODE BLOCK
+   if( debug_get_option_dt_options() & VT_TRACK_EVENTS )
+   {
+      XEvent event;
+
+      XSelectInput(dt_dpy, dr->drawable,StructureNotifyMask|VisibilityChangeMask);
+
+      while(XPending(dt_dpy)) {
+         XNextEvent(dt_dpy, &event);
+         switch(event.type) {
+            case ConfigureNotify:
+		dt->w = event.xconfigure.width;
+		dt->h = event.xconfigure.height;
+		if(event.xconfigure.send_event)
+		{
+		dt->x = event.xconfigure.x;
+		dt->y = event.xconfigure.y;
+		};
+		dt_sync_coords = true;
+		//printf("configure %d %d\n", pos_track.x, pos_track.y);
+		break;
+            case VisibilityNotify:
+		//printf("visibility %d\n",event.xvisibility.state);
+		dt->vis = event.xvisibility.state;
+		dt_sync_coords = true;
+		break;
+		/*switch(event.xvisibility.state)
+		{
+		case VisibilityUnobscured
+		}*/
+            default:
+		break;
+         }
+      }
+   }
+
+// parent tracking code, use for debug wine drawables detection
+#if 0
+
+   Window parent = dr->drawable, *children;
+   Drawable root; 
+   while( parent && XQueryTree(dt_dpy, parent, &root, &parent, &children, &tmp) )
+   {
+       XWindowAttributes attrs;
+       int x, y;
+
+printf("parent %d\n", parent);
+      if( !parent ) break;
+      XGetWindowAttributes(dt_dpy, parent, &attrs);
+      printf("attrs %d %d %d\n", attrs.map_state, attrs.x, attrs.y );
+XTranslateCoordinates(dt_dpy,
+                      parent,         // get position for this window
+                      attrs.root,//DefaultRootWindow(pos_track.dpy), // something like macro: DefaultRootWindow(dpy)
+                      attrs.x, attrs.y,        // local left top coordinates of the wnd
+                      &x,     // these is position of wnd in root_window
+                      &y,     // ...
+                      &tmp);
+
+      XFree((char *)children);
+  }
+#endif
+
+   // get coordinates from x11 (slow)
+   if( dt_sync_coords )
+   {
+      int x = 0, y = 0;
+	  Window tmp;
+      XWindowAttributes attrs;
+
+      XGetWindowAttributes(dt_dpy, dr->drawable, &attrs);
+      if( !(debug_get_option_dt_options() & VT_IGNORE_ATTR_COORDS))
+         x = attrs.x, y = attrs.y;
+      // printf("attrs %d %d %d\n", attrs.map_state, attrs.x, attrs.y );
+      // XGetGeometry(dt_dpy, dr->drawable, &root, &x, &y, &dt->w, &dt->h, &tmp, &tmp);
+      XTranslateCoordinates(dt_dpy,
+                      dr->drawable,         // get position for this window
+                      attrs.root,//DefaultRootWindow(pos_track.dpy), // something like macro: DefaultRootWindow(dpy)
+                      x, y,        // local left top coordinates of the wnd
+                      &dt->x,     // these is position of wnd in root_window
+                      &dt->y,     // ...
+                      &tmp);
+
+      //printf("translate %d %d\n", dt->x, dt->y );
+
+      if( dt->x < 0 || dt->y < 0 )
+      {
+         if( x > 0 && y > 0 ) dt->x = x, dt->y = y;
+         else dt->x = dt->y = 0;
+      }
+
+      if( attrs.width > 0 && attrs.height > 0 )
+         dt->w = attrs.width, dt->h = attrs.height;
+
+      if( dt->w <= 0|| dt->h <= 0 )
+         dt->w = box.width, dt->h = box.height;
+
+      dt->mapped = (attrs.map_state == 2) || (debug_get_option_dt_options() & VT_IGNORE_MAP);
+   }
+   // printf("vis %d %d\n", dt->vis, dt_visible);
+   dt_visible =  (!dt->vis || ((dt->vis == 1) && (debug_get_option_dt_options() & VT_IGNORE_VIS))) && dt->mapped;
+
+   if( hide_overlay ) {
+      if( dt_sync_coords )
+         virgl_vtest_send_dt(virgl_vtest_winsys(vws), VCMD_DT_CMD_SET_RECT, dt->x, dt->y, 1, 1, dt->id, 0, dt_visible);
+   }
+   else 
+   {
+      if( dt_sync_coords )
+         virgl_vtest_send_dt(virgl_vtest_winsys(vws), VCMD_DT_CMD_SET_RECT, dt->x, dt->y, dt->w, dt->h, dt->id, 0, dt_visible);
+   
+      if( dt_visible )
+         virgl_vtest_send_dt(virgl_vtest_winsys(vws), VCMD_DT_CMD_FLUSH, box.x, box.y, box.width, box.height, dt->id, res->res_handle, (uint32_t)dr->drawable);
+
+      if( ( dt_visible || !dt->mapped || dt->vis == 2 ) && dt->drawable && !(debug_get_option_dt_options() & VT_ALWAYS_READBACK)  )
+         return;
+   }
+
+   dt->drawable = dr->drawable;
+// CODE BLOCK END
+
+   //vtws->sws->displaytarget_display(vtws->sws, res->dt, winsys_drawable_handle, sub_box);
+   vtws->sws->displaytarget_display(vtws->sws, res->dt->sws_dt, winsys_drawable_handle, sub_box);
 }
 
 static void
@@ -680,7 +906,10 @@ virgl_vtest_winsys_wrap(struct sw_winsys *sws)
    if (!vtws)
       return NULL;
 
-   virgl_vtest_connect(vtws);
+   //virgl_vtest_connect(vtws);
+   while(virgl_vtest_connect(vtws));
+      usleep(100000);   
+   
    vtws->sws = sws;
 
    virgl_resource_cache_init(&vtws->cache, CACHE_TIMEOUT_USEC,

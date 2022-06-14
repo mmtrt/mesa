@@ -25,13 +25,18 @@
 #ifndef VTEST_PROTOCOL
 #define VTEST_PROTOCOL
 
-#define VTEST_DEFAULT_SOCKET_NAME "/tmp/.virgl_test"
+//#define VTEST_DEFAULT_SOCKET_NAME "/tmp/.virgl_test"
+#define VTEST_DEFAULT_SOCKET_NAME ""
+
+#define VIRGL_RENDERER_UNSTABLE_APIS
 
 #ifdef VIRGL_RENDERER_UNSTABLE_APIS
 #define VTEST_PROTOCOL_VERSION 3
 #else
 #define VTEST_PROTOCOL_VERSION 2
 #endif
+
+#define VTEST_PROTOCOL_VERSION 3
 
 /* 32-bit length field */
 /* 32-bit cmd field */
@@ -61,7 +66,10 @@
 /* 0 length cmd */
 /* resp VCMD_GET_CAPS + caps */
 
-#define VCMD_PING_PROTOCOL_VERSION 10
+#define VCMD_DT_COMMAND 10
+
+//#define VCMD_PING_PROTOCOL_VERSION 10
+#define VCMD_PING_PROTOCOL_VERSION 25
 
 #define VCMD_PROTOCOL_VERSION 11
 
@@ -245,5 +253,20 @@ struct vcmd_submit_cmd2_batch {
 #define VCMD_SUBMIT_CMD2_BATCH_SYNC_QUEUE_ID_HI(n) (1 + 8 * (n) + 7)
 
 #endif /* VIRGL_RENDERER_UNSTABLE_APIS */
+
+#define VCMD_DT_SIZE 8
+#define VCMD_DT_CMD 0
+#define VCMD_DT_X 1
+#define VCMD_DT_Y 2
+#define VCMD_DT_WIDTH 3
+#define VCMD_DT_HEIGHT 4
+#define VCMD_DT_ID 5
+#define VCMD_DT_HANDLE 6
+#define VCMD_DT_DRAWABLE 7
+
+#define VCMD_DT_CMD_CREATE 0
+#define VCMD_DT_CMD_DESTROY 1
+#define VCMD_DT_CMD_SET_RECT 2
+#define VCMD_DT_CMD_FLUSH 3
 
 #endif /* VTEST_PROTOCOL */
