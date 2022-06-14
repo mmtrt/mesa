@@ -68,8 +68,8 @@ xmesa_st_framebuffer_display(struct st_framebuffer_iface *stfbi,
    struct pipe_resource *pres;
    struct pipe_context *pctx = stctx ? stctx->pipe : NULL;
 
-   if (!ptex)
-      return true;
+   //if (!ptex)
+      //return true;
 
    pres = xstfb->display_resource;
    /* (re)allocate the surface for the texture to be displayed */

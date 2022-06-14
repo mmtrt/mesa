@@ -744,7 +744,7 @@ choose_visual( Display *dpy, int screen, const int *list, GLboolean fbConfig )
 
    if (xmesa_init( dpy ) != 0) {
       _mesa_warning(NULL, "Failed to initialize display");
-      return NULL;
+      //return NULL;
    }
 
    parselist = list;
@@ -769,7 +769,7 @@ choose_visual( Display *dpy, int screen, const int *list, GLboolean fbConfig )
 	 case GLX_USE_GL:
             if (fbConfig) {
                /* invalid token */
-               return NULL;
+               //return NULL;
             }
             else {
                /* skip */
@@ -787,7 +787,7 @@ choose_visual( Display *dpy, int screen, const int *list, GLboolean fbConfig )
 	 case GLX_RGBA:
             if (fbConfig) {
                /* invalid token */
-               return NULL;
+               //return NULL;
             }
             else {
                rgb_flag = GL_TRUE;
@@ -1010,7 +1010,8 @@ choose_visual( Display *dpy, int screen, const int *list, GLboolean fbConfig )
     * double buffering, depth buffer, etc. will be associated with the X
     * visual and stored in the VisualTable[].
     */
-   if (desiredVisualID != -1) {
+   //if (desiredVisualID != -1) {
+   {
       /* try to get a specific visual, by visualID */
       XVisualInfo temp;
       int n;
@@ -1023,7 +1024,8 @@ choose_visual( Display *dpy, int screen, const int *list, GLboolean fbConfig )
          rgb_flag = GL_TRUE;
       }
    }
-   else if (level==0) {
+   //else if (level==0) {
+   if (vis==0) {
       /* normal color planes */
       /* Get an RGB visual */
       int min_rgb = min_red + min_green + min_blue;
